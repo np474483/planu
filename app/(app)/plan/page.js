@@ -1,10 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { RefreshCw, Clock, BookOpen } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import LoadingSpinner, { SkeletonCard } from '@/components/LoadingSpinner';
-import { getStudyPlan, formatPlanDate, getPlanTotalHours } from '@/lib/mock/plan';
+import { auth } from '@/lib/firebase';
 
 const SUBJECT_COLORS = [
   'linear-gradient(102deg, #38BDF8 0%, #0369A1 100%)',
@@ -24,16 +25,94 @@ function getSubjectColor(subjectId) {
   return colorMap[subjectId];
 }
 
+const formatPlanDate = (dateString) => {
+  return new Date(dateString).toLocaleDateString('en-IN', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  });
+};
+
 export default function PlanPage() {
-  const [plan, setPlan] = useState(getStudyPlan());
-  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+  const [plan, setPlan] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [generating, setGenerating] = useState(false);
   const [expandedDay, setExpandedDay] = useState(null);
 
+  const fetchActivePlan = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+      const res = await fetch('/api/ai/plan', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setPlan(data.data.plan);
+      } else {
+        throw new Error(data.error || 'Failed to load study plan');
+      }
+    } catch (err) {
+      console.error('[plan] Fetch error:', err);
+      setError(err.message || 'Something went wrong while loading study plan');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        fetchActivePlan();
+      } else {
+        router.push('/');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [router]);
+
   const handleGenerate = async () => {
-    setLoading(true);
-    await new Promise((r) => setTimeout(r, 2000));
-    setPlan(getStudyPlan()); // Mock: same data, just simulates regeneration
-    setLoading(false);
+    try {
+      setGenerating(true);
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch('/api/ai/plan', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to generate study plan');
+      }
+
+      setPlan(data.data.plan);
+    } catch (err) {
+      console.error('[plan] Generation error:', err);
+      alert(err.message);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const getPlanTotalHours = () => {
+    if (!plan || !plan.days) return 0;
+    const totalMins = plan.days
+      .flatMap((d) => d.sessions || [])
+      .reduce((sum, s) => sum + s.duration_mins, 0);
+    return Math.round(totalMins / 60);
   };
 
   const lastGenerated = plan?.generated_at
@@ -45,7 +124,7 @@ export default function PlanPage() {
       <TopHeader
         title="Study Plan"
         rightSlot={
-          plan && !loading ? (
+          plan && !loading && !generating ? (
             <button
               onClick={handleGenerate}
               style={{
@@ -64,12 +143,17 @@ export default function PlanPage() {
 
       <div className="page-padding">
         {/* Loading skeleton */}
-        {loading ? (
+        {loading || generating ? (
           <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
-              <LoadingSpinner size={40} label="AI is building your study plan…" />
+              <LoadingSpinner size={40} label={generating ? "AI is generating your study plan..." : "AI is building your study plan..."} />
             </div>
             {[...Array(3)].map((_, i) => <SkeletonCard key={i} />)}
+          </div>
+        ) : error ? (
+          <div className="card animate-fade-in" style={{ textAlign: 'center', padding: 24, borderColor: 'var(--error)' }}>
+            <p style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary btn-full" onClick={fetchActivePlan}>Retry</button>
           </div>
         ) : !plan ? (
           /* Empty state */
@@ -79,7 +163,7 @@ export default function PlanPage() {
             <p style={{ marginBottom: 24 }}>
               Let AI create a personalised day-by-day study schedule based on your subjects, topics, and exam dates.
             </p>
-            <button className="btn btn-primary" onClick={handleGenerate}>
+            <button className="btn btn-primary btn-full" onClick={handleGenerate}>
               ✨ Generate My Plan
             </button>
           </div>
@@ -94,7 +178,7 @@ export default function PlanPage() {
                 </p>
                 <p style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
                   <Clock size={13} style={{ display: 'inline', marginRight: 4, verticalAlign: 'middle' }} />
-                  {getPlanTotalHours()}h total · {plan.days.length} days
+                  {getPlanTotalHours()}h total · {plan.days?.length || 0} days
                 </p>
               </div>
               <button
@@ -108,9 +192,9 @@ export default function PlanPage() {
 
             {/* Day cards */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {plan.days.map((day, i) => {
+              {plan.days?.map((day, i) => {
                 const isExpanded = expandedDay === i;
-                const totalMins = day.sessions.reduce((s, sess) => s + sess.duration_mins, 0);
+                const totalMins = (day.sessions || []).reduce((s, sess) => s + sess.duration_mins, 0);
                 return (
                   <div
                     key={day.date}
@@ -134,11 +218,11 @@ export default function PlanPage() {
                           {day.day_label}
                         </div>
                         <div style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.8)', marginTop: 4 }}>
-                          {day.sessions.length} session{day.sessions.length > 1 ? 's' : ''} · {totalMins} mins
+                          {day.sessions?.length || 0} session{day.sessions?.length > 1 ? 's' : ''} · {totalMins} mins
                         </div>
                       </div>
                       <div style={{ display: 'flex', gap: -6 }}>
-                        {day.sessions.slice(0, 3).map((sess, si) => (
+                        {(day.sessions || []).slice(0, 3).map((sess, si) => (
                           <div
                             key={si}
                             style={{
@@ -150,7 +234,7 @@ export default function PlanPage() {
                               fontSize: '0.65rem', color: '#fff', fontWeight: 700,
                             }}
                           >
-                            {sess.subject[0]}
+                            {sess.subject ? sess.subject[0] : '?'}
                           </div>
                         ))}
                       </div>
@@ -162,7 +246,7 @@ export default function PlanPage() {
                     {/* Sessions (expanded) */}
                     {isExpanded && (
                       <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        {day.sessions.map((sess, si) => (
+                        {(day.sessions || []).map((sess, si) => (
                           <div
                             key={si}
                             style={{
@@ -189,7 +273,7 @@ export default function PlanPage() {
                                 </span>
                               </div>
                               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
-                                {sess.topics.map((t) => (
+                                {(sess.topics || []).map((t) => (
                                   <span key={t} className="badge badge-accent" style={{ fontSize: '0.65rem' }}>
                                     <BookOpen size={10} /> {t}
                                   </span>
