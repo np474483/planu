@@ -1,49 +1,166 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Plus, Bell, BellOff, Trash2, Clock } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import Modal from '@/components/Modal';
-import { mockReminders, formatReminderTime } from '@/lib/mock/reminders';
-import { mockSubjects } from '@/lib/mock/subjects';
+import LoadingSpinner from '@/components/LoadingSpinner';
+import { formatReminderTime } from '@/lib/mock/reminders';
+import { auth } from '@/lib/firebase';
 
 export default function RemindersPage() {
-  const [reminders, setReminders] = useState(mockReminders);
+  const router = useRouter();
+  const [reminders, setReminders] = useState([]);
+  const [subjects, setSubjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [showAdd, setShowAdd] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newTime, setNewTime] = useState('08:00');
   const [newSubjectId, setNewSubjectId] = useState('');
 
-  const toggleActive = (id) => {
-    setReminders((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, is_active: !r.is_active } : r))
-    );
+  const loadData = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      // 1. Fetch reminders list
+      const remindersRes = await fetch('/api/reminders', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const remindersData = await remindersRes.json();
+      if (!remindersRes.ok || !remindersData.success) {
+        throw new Error(remindersData.error || 'Failed to fetch reminders');
+      }
+
+      // 2. Fetch subjects list to link reminders
+      const subjectsRes = await fetch('/api/subjects', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const subjectsData = await subjectsRes.json();
+      if (!subjectsRes.ok || !subjectsData.success) {
+        throw new Error(subjectsData.error || 'Failed to fetch subjects');
+      }
+
+      setReminders(remindersData.data.reminders || []);
+      setSubjects(subjectsData.data.subjects || []);
+    } catch (err) {
+      console.error('[reminders] Load error:', err);
+      setError(err.message || 'Something went wrong while loading data');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const deleteReminder = (id) => {
-    setReminders((prev) => prev.filter((r) => r.id !== id));
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        loadData();
+      } else {
+        router.push('/');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [router]);
+
+  const toggleActive = async (id) => {
+    const reminder = reminders.find((r) => r.id === id);
+    if (!reminder) return;
+    const targetStatus = !reminder.is_active;
+
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch(`/api/reminders/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ is_active: targetStatus }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to update reminder status');
+      }
+
+      setReminders((prev) =>
+        prev.map((r) => (r.id === id ? { ...r, is_active: targetStatus } : r))
+      );
+    } catch (err) {
+      alert(err.message);
+    }
   };
 
-  const addReminder = () => {
+  const deleteReminder = async (id) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch(`/api/reminders/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to delete reminder');
+      }
+
+      setReminders((prev) => prev.filter((r) => r.id !== id));
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  const addReminder = async () => {
     if (!newLabel.trim()) return;
-    const sub = mockSubjects.find((s) => s.id === newSubjectId);
-    setReminders((prev) => [
-      ...prev,
-      {
-        id: `rem_${Date.now()}`,
-        user_id: 'user_001',
-        label: newLabel.trim(),
-        reminder_time: newTime,
-        subject_id: newSubjectId || null,
-        subject_name: sub?.name || null,
-        is_active: true,
-        created_at: new Date().toISOString(),
-      },
-    ]);
-    setNewLabel('');
-    setNewTime('08:00');
-    setNewSubjectId('');
-    setShowAdd(false);
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch('/api/reminders', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          label: newLabel.trim(),
+          reminder_time: newTime,
+          subject_id: newSubjectId || null,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to add reminder');
+      }
+
+      setReminders((prev) => [...prev, data.data.reminder]);
+      setNewLabel('');
+      setNewTime('08:00');
+      setNewSubjectId('');
+      setShowAdd(false);
+    } catch (err) {
+      alert(err.message);
+    }
   };
 
   return (
@@ -65,7 +182,16 @@ export default function RemindersPage() {
       />
 
       <div className="page-padding">
-        {reminders.length === 0 ? (
+        {loading ? (
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '50dvh' }}>
+            <LoadingSpinner label="Loading reminders..." />
+          </div>
+        ) : error ? (
+          <div className="card" style={{ textAlign: 'center', padding: 24, borderColor: 'var(--error)' }}>
+            <p style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary btn-full" onClick={loadData}>Retry</button>
+          </div>
+        ) : reminders.length === 0 ? (
           <div className="card animate-fade-in" style={{ textAlign: 'center', padding: '48px 24px' }}>
             <div style={{ fontSize: '3rem', marginBottom: 16 }}>⏰</div>
             <h2 style={{ marginBottom: 8 }}>No Reminders Yet</h2>
@@ -79,7 +205,7 @@ export default function RemindersPage() {
             {reminders.map((rem, i) => (
               <div
                 key={rem.id}
-                className={`card animate-fade-in${!rem.is_active ? '' : ''}`}
+                className="card animate-fade-in"
                 style={{
                   display: 'flex', alignItems: 'center', gap: 12,
                   animationDelay: `${i * 0.04}s`,
@@ -179,7 +305,7 @@ export default function RemindersPage() {
               style={{ cursor: 'pointer' }}
             >
               <option value="">No subject</option>
-              {mockSubjects.map((s) => (
+              {subjects.map((s) => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
