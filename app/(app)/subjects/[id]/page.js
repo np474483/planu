@@ -1,62 +1,212 @@
 'use client';
 
-import { use, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
+import { useRouter, useParams } from 'next/navigation';
 import { Plus, BookOpen, HelpCircle } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import TopicItem from '@/components/TopicItem';
 import ProgressBar from '@/components/ProgressBar';
 import Modal from '@/components/Modal';
-import {
-  getSubjectById, getSubjectProgress, formatExamDate, cycleStatus,
-} from '@/lib/mock/subjects';
+import LoadingSpinner from '@/components/LoadingSpinner';
+import { auth } from '@/lib/firebase';
+import { formatExamDate } from '@/lib/mock/subjects';
 
-export default function TopicsPage({ params }) {
-  const { id } = use(params); // Next.js 16: params is a Promise
+export default function TopicsPage() {
   const router = useRouter();
+  const params = useParams();
+  const subjectId = params?.id;
 
-  const subject = getSubjectById(id);
-  const [topics, setTopics] = useState(subject?.topics ?? []);
+  const [subject, setSubject] = useState(null);
+  const [topics, setTopics] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [newTopicName, setNewTopicName] = useState('');
 
-  if (!subject) {
-    return (
-      <div className="page-padding" style={{ textAlign: 'center', paddingTop: 60 }}>
-        <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>😕</div>
-        <h2>Subject not found</h2>
-        <button className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => router.push('/subjects')}>
-          Back to Subjects
-        </button>
-      </div>
-    );
-  }
+  const loadData = async () => {
+    if (!subjectId) return;
+    try {
+      setLoading(true);
+      setError('');
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      // 1. Fetch subjects list to find details for this subject (name, exam_date)
+      const subjectsRes = await fetch('/api/subjects', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const subjectsData = await subjectsRes.json();
+      if (!subjectsRes.ok || !subjectsData.success) {
+        throw new Error(subjectsData.error || 'Failed to fetch subject details');
+      }
+
+      const foundSubject = subjectsData.data.subjects.find(
+        (s) => String(s.id) === String(subjectId)
+      );
+      if (!foundSubject) {
+        setSubject(null);
+        return;
+      }
+      setSubject(foundSubject);
+
+      // 2. Fetch topics under this subject
+      const topicsRes = await fetch(`/api/subjects/${subjectId}/topics`, {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const topicsData = await topicsRes.json();
+      if (!topicsRes.ok || !topicsData.success) {
+        throw new Error(topicsData.error || 'Failed to fetch topics');
+      }
+
+      setTopics(topicsData.data.topics || []);
+    } catch (err) {
+      console.error('[topics] Load error:', err);
+      setError(err.message || 'Something went wrong while loading data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        loadData();
+      } else {
+        router.push('/');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [subjectId, router]);
 
   const completedCount = topics.filter((t) => t.status === 'completed').length;
   const progress = topics.length ? Math.round((completedCount / topics.length) * 100) : 0;
 
-  const handleStatusChange = (topicId, newStatus) => {
-    setTopics((prev) =>
-      prev.map((t) => (t.id === topicId ? { ...t, status: newStatus } : t))
-    );
+  const handleStatusChange = async (topicId, newStatus) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch(`/api/topics/${topicId}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: newStatus }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to update topic status');
+      }
+
+      setTopics((prev) =>
+        prev.map((t) => (t.id === topicId ? { ...t, status: newStatus } : t))
+      );
+    } catch (err) {
+      alert(err.message);
+    }
   };
 
-  const handleAddTopic = () => {
+  const handleAddTopic = async () => {
     if (!newTopicName.trim()) return;
-    const newTopic = {
-      id: `top_${Date.now()}`,
-      subject_id: subject.id,
-      name: newTopicName.trim(),
-      status: 'not_started',
-    };
-    setTopics((prev) => [...prev, newTopic]);
-    setNewTopicName('');
-    setShowAddModal(false);
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch(`/api/subjects/${subjectId}/topics`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: newTopicName.trim() }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to create topic');
+      }
+
+      setTopics((prev) => [...prev, data.data.topic]);
+      setNewTopicName('');
+      setShowAddModal(false);
+    } catch (err) {
+      alert(err.message);
+    }
   };
 
-  const handleDeleteTopic = (topicId) => {
-    setTopics((prev) => prev.filter((t) => t.id !== topicId));
+  const handleDeleteTopic = async (topicId) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch(`/api/topics/${topicId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to delete topic');
+      }
+
+      setTopics((prev) => prev.filter((t) => t.id !== topicId));
+    } catch (err) {
+      alert(err.message);
+    }
   };
+
+  if (loading) {
+    return (
+      <>
+        <TopHeader title="Loading..." backHref="/subjects" />
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '50dvh' }}>
+          <LoadingSpinner label="Loading topics..." />
+        </div>
+      </>
+    );
+  }
+
+  if (error) {
+    return (
+      <>
+        <TopHeader title="Error" backHref="/subjects" />
+        <div className="page-padding">
+          <div className="card" style={{ textAlign: 'center', padding: 24, borderColor: 'var(--error)' }}>
+            <p style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary btn-full" onClick={loadData}>Retry</button>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  if (!subject) {
+    return (
+      <>
+        <TopHeader title="Not Found" backHref="/subjects" />
+        <div className="page-padding" style={{ textAlign: 'center', paddingTop: 60 }}>
+          <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>😕</div>
+          <h2>Subject not found</h2>
+          <button className="btn btn-primary" style={{ marginTop: 16 }} onClick={() => router.push('/subjects')}>
+            Back to Subjects
+          </button>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>

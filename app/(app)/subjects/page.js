@@ -1,42 +1,116 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Plus, Search } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import SubjectCard from '@/components/SubjectCard';
 import Modal from '@/components/Modal';
-import { mockSubjects } from '@/lib/mock/subjects';
+import LoadingSpinner from '@/components/LoadingSpinner';
+import { auth } from '@/lib/firebase';
 
 export default function SubjectsPage() {
-  const [subjects, setSubjects] = useState(mockSubjects);
+  const router = useRouter();
+  const [subjects, setSubjects] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [query, setQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDate, setNewDate] = useState('');
 
+  const fetchSubjects = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+      const res = await fetch('/api/subjects', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSubjects(data.data.subjects || []);
+      } else {
+        throw new Error(data.error || 'Failed to fetch subjects');
+      }
+    } catch (err) {
+      console.error('[subjects] Fetch error:', err);
+      setError(err.message || 'Something went wrong while loading data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        fetchSubjects();
+      } else {
+        router.push('/');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [router]);
+
+  const handleAdd = async () => {
+    if (!newName.trim() || !newDate) return;
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+      const res = await fetch('/api/subjects', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: newName.trim(),
+          exam_date: newDate,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to create subject');
+      }
+      setSubjects((prev) => [...prev, data.data.subject]);
+      setNewName('');
+      setNewDate('');
+      setShowAddModal(false);
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  const handleDelete = async (id) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+      const res = await fetch(`/api/subjects/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to delete subject');
+      }
+      setSubjects((prev) => prev.filter((s) => s.id !== id));
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
   const filtered = subjects.filter((s) =>
     s.name.toLowerCase().includes(query.toLowerCase())
   );
-
-  const handleAdd = () => {
-    if (!newName.trim() || !newDate) return;
-    setSubjects((prev) => [
-      ...prev,
-      {
-        id: `sub_${Date.now()}`,
-        user_id: 'user_001',
-        name: newName.trim(),
-        exam_date: newDate,
-        created_at: new Date().toISOString(),
-        topics: [],
-      },
-    ]);
-    setNewName('');
-    setNewDate('');
-    setShowAddModal(false);
-  };
-
-  const handleDelete = (id) => setSubjects((prev) => prev.filter((s) => s.id !== id));
 
   return (
     <>
@@ -74,8 +148,17 @@ export default function SubjectsPage() {
           />
         </div>
 
-        {/* Subject list */}
-        {filtered.length === 0 ? (
+        {/* Loading / Error / Content states */}
+        {loading ? (
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '50dvh' }}>
+            <LoadingSpinner label="Loading subjects..." />
+          </div>
+        ) : error ? (
+          <div className="card" style={{ textAlign: 'center', padding: 24, borderColor: 'var(--error)' }}>
+            <p style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary btn-full" onClick={fetchSubjects}>Retry</button>
+          </div>
+        ) : filtered.length === 0 ? (
           <div className="card animate-fade-in" style={{ textAlign: 'center', padding: 40 }}>
             <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>
               {query ? '🔍' : '📚'}
