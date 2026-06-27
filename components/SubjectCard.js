@@ -15,9 +15,9 @@ import { formatExamDate, getSubjectProgress } from '@/lib/mock/subjects';
  */
 export default function SubjectCard({ subject, onEdit, onDelete }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const progress = getSubjectProgress(subject.id);
   const topicCount = subject.topics?.length ?? 0;
   const done = subject.topics?.filter((t) => t.status === 'completed').length ?? 0;
+  const progress = topicCount === 0 ? 0 : Math.round((done / topicCount) * 100);
 
   return (
     <div

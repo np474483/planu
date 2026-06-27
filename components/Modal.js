@@ -20,6 +20,11 @@ export default function Modal({ open, onClose, title, children }) {
     >
       <div
         className="modal-sheet animate-slide-up"
+        style={{
+          maxHeight: '90dvh',
+          overflowY: 'auto',
+          paddingBottom: 'calc(80px + env(safe-area-inset-bottom))',
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="modal-handle" />
