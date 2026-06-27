@@ -2,19 +2,60 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { signInWithPopup } from 'firebase/auth';
+import { auth, googleProvider } from '@/lib/firebase';
 import ThemeSwitcher from '@/components/ThemeSwitcher';
 
 export default function LoginPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
-    // Mock: simulate auth delay, then go to onboarding (first time)
-    await new Promise((r) => setTimeout(r, 1200));
-    // In real app: check if new user → /onboarding, else → /dashboard
-    // For UI phase, always go to onboarding to see that screen too
-    router.push('/onboarding');
+    setError('');
+
+    try {
+      // 1. Firebase Google OAuth popup
+      const result = await signInWithPopup(auth, googleProvider);
+      const user = result.user;
+
+      // 2. Get Firebase ID token
+      const idToken = await user.getIdToken();
+
+      // 3. Call backend to check/create user in PostgreSQL
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Login failed');
+      }
+
+      // 4. Route based on new vs existing user
+      if (data.data.isNewUser) {
+        router.push('/onboarding');
+      } else {
+        router.push('/dashboard');
+      }
+    } catch (err) {
+      console.error('[login] Error:', err);
+
+      // Don't show error if user simply closed the popup
+      if (err.code === 'auth/popup-closed-by-user') {
+        setLoading(false);
+        return;
+      }
+
+      setError(err.message || 'Something went wrong. Please try again.');
+      setLoading(false);
+    }
   };
 
   return (
@@ -170,6 +211,20 @@ export default function LoginPage() {
           )}
           {loading ? 'Signing in…' : 'Continue with Google'}
         </button>
+
+        {error && (
+          <p style={{
+            textAlign: 'center',
+            fontSize: '0.8125rem',
+            color: '#F43F5E',
+            marginBottom: 12,
+            padding: '8px 12px',
+            background: 'color-mix(in srgb, #F43F5E 8%, transparent)',
+            borderRadius: 8,
+          }}>
+            {error}
+          </p>
+        )}
 
         <p style={{ textAlign: 'center', fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
           For students from School to Master's level 🎓
