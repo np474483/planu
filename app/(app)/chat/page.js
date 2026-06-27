@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useState, useRef, useEffect, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { Send, ChevronDown, BookOpen } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import ChatBubble, { TypingIndicator } from '@/components/ChatBubble';
-import { mockSubjects } from '@/lib/mock/subjects';
+import LoadingSpinner from '@/components/LoadingSpinner';
+import { auth } from '@/lib/firebase';
 
 const INITIAL_MESSAGES = [
   {
@@ -16,26 +17,51 @@ const INITIAL_MESSAGES = [
   },
 ];
 
-const MOCK_REPLIES = [
-  "Great question! Let me break this down for you. This concept is foundational to understanding the subject as a whole. Think of it like building blocks — once you understand the fundamentals, everything else falls into place naturally.",
-  "That's a key topic! Here's the core idea: the underlying principle here involves understanding how components interact with each other. At your level, the most important thing to grasp is the 'why' behind the pattern, not just the 'how'.",
-  "Excellent! This is one of the most commonly misunderstood topics. Let me explain it step by step with a simple analogy that should make it click immediately.",
-  "I love that question! This connects to several other topics you're studying. Essentially, the concept works by establishing a relationship between inputs and expected outputs — much like a recipe that guarantees a specific dish.",
-];
-
-let replyIndex = 0;
-
-export default function ChatPage() {
+function ChatContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
-  const subjectId = searchParams.get('subject');
+  const subjectId = searchParams?.get('subject');
+  const topicParam = searchParams?.get('topic') || '';
+
   const [messages, setMessages] = useState(INITIAL_MESSAGES);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
+  const [subjects, setSubjects] = useState([]);
   const [activeSubjectId, setActiveSubjectId] = useState(subjectId || '');
   const [showSubjectPicker, setShowSubjectPicker] = useState(false);
   const messagesEndRef = useRef(null);
 
-  const activeSubject = mockSubjects.find((s) => s.id === activeSubjectId);
+  const activeSubject = subjects.find((s) => String(s.id) === String(activeSubjectId));
+
+  const loadSubjects = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+      const res = await fetch('/api/subjects', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSubjects(data.data.subjects || []);
+      }
+    } catch (err) {
+      console.error('[chat] Failed to load subjects:', err);
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        loadSubjects();
+      } else {
+        router.push('/');
+      }
+    });
+    return () => unsubscribe();
+  }, [router]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -43,28 +69,86 @@ export default function ChatPage() {
 
   const sendMessage = async () => {
     if (!input.trim() || typing) return;
+
+    const userMessageText = input.trim();
+    const timestamp = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    
     const userMsg = {
       id: `m_${Date.now()}`,
       role: 'user',
-      content: input.trim(),
-      time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+      content: userMessageText,
+      time: timestamp,
     };
+
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setTyping(true);
-    await new Promise((r) => setTimeout(r, 1200 + Math.random() * 800));
-    const reply = MOCK_REPLIES[replyIndex % MOCK_REPLIES.length];
-    replyIndex++;
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `m_${Date.now() + 1}`,
-        role: 'ai',
-        content: reply,
-        time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-      },
-    ]);
-    setTyping(false);
+
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      // Format history: Array<{ role: 'user'|'ai', text: string }>
+      const historyForAPI = messages
+        .filter((msg) => msg.role === 'user' || msg.role === 'ai')
+        .map((msg) => ({
+          role: msg.role,
+          text: msg.content,
+        }));
+
+      const res = await fetch('/api/ai/chat', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: userMessageText,
+          subjectName: activeSubject ? activeSubject.name : 'General Studies',
+          topicName: topicParam,
+          history: historyForAPI,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        const errMsg = data.error || 'AI response failed, please try again';
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys_${Date.now()}`,
+            role: 'system',
+            content: errMsg,
+            time: timestamp,
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `m_${Date.now() + 1}`,
+            role: 'ai',
+            content: data.data.reply,
+            time: timestamp,
+          },
+        ]);
+      }
+    } catch (err) {
+      console.error('[chat] Send error:', err);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys_${Date.now()}`,
+          role: 'system',
+          content: 'AI response failed, please try again',
+          time: timestamp,
+        },
+      ]);
+    } finally {
+      setTyping(false);
+    }
   };
 
   return (
@@ -76,16 +160,21 @@ export default function ChatPage() {
             onClick={() => setShowSubjectPicker((v) => !v)}
             style={{
               display: 'flex', alignItems: 'center', gap: 4,
-              background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+              background: 'var(--accent)', border: 'none',
               borderRadius: 'var(--radius-full)', padding: '4px 10px',
               cursor: 'pointer', fontSize: '0.72rem', fontWeight: 600,
-              color: 'var(--text-secondary)', maxWidth: 100,
-              overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+              color: '#fff', whiteSpace: 'nowrap',
             }}
           >
-            <BookOpen size={12} />
-            {activeSubject ? activeSubject.name.split(' ')[0] : 'Subject'}
-            <ChevronDown size={12} />
+            {activeSubject ? (
+              `📚 ${activeSubject.name.split(' ')[0]}`
+            ) : (
+              <>
+                <BookOpen size={12} />
+                Subject
+                <ChevronDown size={12} />
+              </>
+            )}
           </button>
         }
       />
@@ -117,7 +206,7 @@ export default function ChatPage() {
             >
               No subject (general)
             </button>
-            {mockSubjects.map((s) => (
+            {subjects.map((s) => (
               <button
                 key={s.id}
                 onClick={() => { setActiveSubjectId(s.id); setShowSubjectPicker(false); }}
@@ -158,9 +247,30 @@ export default function ChatPage() {
           minHeight: 0,
         }}
       >
-        {messages.map((msg) => (
-          <ChatBubble key={msg.id} role={msg.role} content={msg.content} time={msg.time} />
-        ))}
+        {messages.map((msg) => {
+          if (msg.role === 'system') {
+            return (
+              <div
+                key={msg.id}
+                style={{
+                  alignSelf: 'center',
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-muted)',
+                  fontSize: '0.75rem',
+                  padding: '6px 12px',
+                  borderRadius: 'var(--radius-btn)',
+                  margin: '8px 0',
+                  textAlign: 'center',
+                  maxWidth: '85%'
+                }}
+              >
+                ⚠️ {msg.content}
+              </div>
+            );
+          }
+          return <ChatBubble key={msg.id} role={msg.role} content={msg.content} time={msg.time} />;
+        })}
         {typing && <TypingIndicator />}
         <div ref={messagesEndRef} />
       </div>
@@ -210,5 +320,17 @@ export default function ChatPage() {
         </button>
       </div>
     </>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '50dvh' }}>
+        <LoadingSpinner label="Loading chat..." />
+      </div>
+    }>
+      <ChatContent />
+    </Suspense>
   );
 }
