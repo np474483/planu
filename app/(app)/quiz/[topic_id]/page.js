@@ -1,40 +1,105 @@
 'use client';
 
-import { use, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
+import { useRouter, useParams } from 'next/navigation';
 import { History, Trophy, RotateCcw, ChevronRight } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import QuizOption from '@/components/QuizOption';
 import LoadingSpinner from '@/components/LoadingSpinner';
-import { getQuizOrDefault } from '@/lib/mock/quiz';
-import { getTopicById } from '@/lib/mock/subjects';
+import { auth } from '@/lib/firebase';
 
-export default function QuizPage({ params }) {
-  const { topic_id } = use(params);
+export default function QuizPage() {
   const router = useRouter();
+  const params = useParams();
+  const topicId = params?.topic_id;
 
-  const topic = getTopicById(topic_id);
-  const quiz = getQuizOrDefault(topic_id, topic?.name ?? 'Topic', topic?.subjectName ?? 'Subject');
-
+  const [questions, setQuestions] = useState([]);
+  const [topicName, setTopicName] = useState('Quiz');
+  const [subjectId, setSubjectId] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [currentQ, setCurrentQ] = useState(0);
   const [answers, setAnswers] = useState({}); // { qIndex: selectedOptionIndex }
   const [revealed, setRevealed] = useState({}); // which questions have been answered
   const [done, setDone] = useState(false);
-  const [started, setStarted] = useState(false);
 
-  const handleStart = async () => {
-    await new Promise((r) => setTimeout(r, 1000));
-    setLoading(false);
-    setStarted(true);
+  const fetchQuizData = async () => {
+    if (!topicId) return;
+    try {
+      setLoading(true);
+      setError('');
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch('/api/ai/quiz', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          topic_id: parseInt(topicId, 10),
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to generate quiz');
+      }
+
+      setQuestions(data.data.questions || []);
+      setTopicName(data.data.topic_name || 'Topic');
+      setSubjectId(data.data.subject_id || '');
+    } catch (err) {
+      console.error('[quiz] Generation error:', err);
+      setError(err.message || 'Something went wrong while generating the quiz');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  // Auto-kick off loading on first render
-  if (!started && loading) {
-    setTimeout(handleStart, 100);
-  }
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        fetchQuizData();
+      } else {
+        router.push('/');
+      }
+    });
 
-  const question = quiz.questions[currentQ];
+    return () => unsubscribe();
+  }, [topicId, router]);
+
+  const submitScore = async (finalScore) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch('/api/quiz', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          topic_id: parseInt(topicId, 10),
+          score: finalScore,
+          total: questions.length || 5,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        console.error('[quiz] Failed to save score record:', data.error);
+      }
+    } catch (err) {
+      console.error('[quiz] Network error while saving score:', err);
+    }
+  };
+
+  const question = questions[currentQ];
   const isAnswered = currentQ in revealed;
 
   const handleAnswer = (optionIndex) => {
@@ -44,32 +109,47 @@ export default function QuizPage({ params }) {
   };
 
   const handleNext = () => {
-    if (currentQ < quiz.questions.length - 1) {
+    if (currentQ < questions.length - 1) {
       setCurrentQ((q) => q + 1);
     } else {
       setDone(true);
+      submitScore(score);
     }
   };
 
   const score = Object.entries(answers).filter(
-    ([qi, ans]) => quiz.questions[+qi].correct_index === ans
+    ([qi, ans]) => questions[+qi]?.correct_index === ans
   ).length;
 
   const getScoreEmoji = () => {
-    const pct = (score / quiz.questions.length) * 100;
+    const pct = questions.length ? (score / questions.length) * 100 : 0;
     if (pct === 100) return '🏆';
-    if (pct >= 80)  return '🌟';
-    if (pct >= 60)  return '👍';
-    if (pct >= 40)  return '📚';
+    if (pct >= 80) return '🌟';
+    if (pct >= 60) return '👍';
+    if (pct >= 40) return '📚';
     return '💪';
   };
 
   if (loading) {
     return (
       <>
-        <TopHeader title="Quiz" backHref={`/subjects/${topic?.subject_id ?? ''}`} />
+        <TopHeader title="Quiz" backHref={subjectId ? `/subjects/${subjectId}` : '/subjects'} />
         <div className="page-padding" style={{ display: 'flex', justifyContent: 'center', paddingTop: 48 }}>
           <LoadingSpinner size={40} label="Generating your quiz…" />
+        </div>
+      </>
+    );
+  }
+
+  if (error) {
+    return (
+      <>
+        <TopHeader title="Quiz Error" backHref={subjectId ? `/subjects/${subjectId}` : '/subjects'} />
+        <div className="page-padding">
+          <div className="card" style={{ textAlign: 'center', padding: 24, borderColor: 'var(--error)' }}>
+            <p style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary btn-full" onClick={fetchQuizData}>Retry</button>
+          </div>
         </div>
       </>
     );
@@ -87,25 +167,25 @@ export default function QuizPage({ params }) {
           >
             <div style={{ fontSize: '3.5rem', marginBottom: 12 }}>{getScoreEmoji()}</div>
             <div style={{ fontSize: '3rem', fontWeight: 800, color: '#fff', lineHeight: 1 }}>
-              {score}/{quiz.questions.length}
+              {score}/{questions.length}
             </div>
             <div style={{ color: 'rgba(255,255,255,0.8)', marginTop: 6, fontSize: '0.875rem' }}>
-              {Math.round((score / quiz.questions.length) * 100)}% correct
+              {questions.length ? Math.round((score / questions.length) * 100) : 0}% correct
             </div>
             <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.8rem', marginTop: 4 }}>
-              {quiz.topic_name}
+              {topicName}
             </div>
           </div>
 
           {/* Review answers */}
           <div style={{ textAlign: 'left', marginBottom: 20 }}>
             <h2 style={{ fontSize: '0.9375rem', marginBottom: 12 }}>Review</h2>
-            {quiz.questions.map((q, i) => {
+            {questions.map((q, i) => {
               const selected = answers[i];
               const correct = q.correct_index;
               const isCorrect = selected === correct;
               return (
-                <div key={q.id} className="card" style={{ marginBottom: 10, padding: 12 }}>
+                <div key={q.id || i} className="card" style={{ marginBottom: 10, padding: 12 }}>
                   <p style={{ fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>
                     Q{i + 1}. {q.question}
                   </p>
@@ -131,7 +211,7 @@ export default function QuizPage({ params }) {
             <button
               className="btn btn-secondary"
               style={{ flex: 1 }}
-              onClick={() => router.push(`/quiz/${topic_id}/history`)}
+              onClick={() => router.push(`/quiz/${topicId}/history`)}
             >
               <History size={15} /> History
             </button>
@@ -153,8 +233,8 @@ export default function QuizPage({ params }) {
   return (
     <>
       <TopHeader
-        title={`Quiz · Q${currentQ + 1}/${quiz.questions.length}`}
-        backHref={`/subjects/${topic?.subject_id ?? ''}`}
+        title={`Quiz · Q${currentQ + 1}/${questions.length}`}
+        backHref={subjectId ? `/subjects/${subjectId}` : '/subjects'}
       />
 
       <div className="page-padding">
@@ -162,57 +242,61 @@ export default function QuizPage({ params }) {
         <div style={{ marginBottom: 20 }} className="animate-fade-in">
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
             <span className="badge badge-accent" style={{ fontSize: '0.7rem' }}>
-              📚 {quiz.topic_name}
+              📚 {topicName}
             </span>
             <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-              {Object.keys(revealed).length}/{quiz.questions.length} answered
+              {Object.keys(revealed).length}/{questions.length} answered
             </span>
           </div>
           <div className="progress-track" style={{ height: 6 }}>
             <div
               className="progress-fill"
-              style={{ width: `${((currentQ) / quiz.questions.length) * 100}%` }}
+              style={{ width: `${((currentQ) / questions.length) * 100}%` }}
             />
           </div>
         </div>
 
         {/* Question card */}
-        <div
-          key={currentQ}
-          className="grad-card animate-fade-in"
-          style={{ padding: '20px 18px', marginBottom: 20 }}
-        >
-          <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.7)', fontWeight: 500, marginBottom: 8 }}>
-            Question {currentQ + 1} of {quiz.questions.length}
+        {question && (
+          <div
+            key={currentQ}
+            className="grad-card animate-fade-in"
+            style={{ padding: '20px 18px', marginBottom: 20 }}
+          >
+            <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.7)', fontWeight: 500, marginBottom: 8 }}>
+              Question {currentQ + 1} of {questions.length}
+            </div>
+            <p style={{ fontSize: '0.9375rem', fontWeight: 600, color: '#fff', lineHeight: 1.5 }}>
+              {question.question}
+            </p>
           </div>
-          <p style={{ fontSize: '0.9375rem', fontWeight: 600, color: '#fff', lineHeight: 1.5 }}>
-            {question.question}
-          </p>
-        </div>
+        )}
 
         {/* Options */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-          {question.options.map((opt, i) => {
-            let state = 'idle';
-            if (isAnswered) {
-              if (i === question.correct_index) state = 'correct';
-              else if (i === answers[currentQ]) state = 'wrong';
-            }
-            return (
-              <QuizOption
-                key={i}
-                index={i}
-                label={opt}
-                state={state}
-                disabled={isAnswered}
-                onClick={() => handleAnswer(i)}
-              />
-            );
-          })}
-        </div>
+        {question && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+            {question.options.map((opt, i) => {
+              let state = 'idle';
+              if (isAnswered) {
+                if (i === question.correct_index) state = 'correct';
+                else if (i === answers[currentQ]) state = 'wrong';
+              }
+              return (
+                <QuizOption
+                  key={i}
+                  index={i}
+                  label={opt}
+                  state={state}
+                  disabled={isAnswered}
+                  onClick={() => handleAnswer(i)}
+                />
+              );
+            })}
+          </div>
+        )}
 
         {/* Explanation (shown after answering) */}
-        {isAnswered && (
+        {isAnswered && question && (
           <div
             className="card-elevated animate-fade-in"
             style={{ padding: '12px 14px', marginBottom: 20 }}
@@ -229,7 +313,7 @@ export default function QuizPage({ params }) {
             className="btn btn-primary btn-full animate-fade-in"
             onClick={handleNext}
           >
-            {currentQ < quiz.questions.length - 1 ? (
+            {currentQ < questions.length - 1 ? (
               <>Next Question <ChevronRight size={16} /></>
             ) : (
               <><Trophy size={16} /> See Results</>

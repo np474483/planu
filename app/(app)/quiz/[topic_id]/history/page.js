@@ -1,26 +1,137 @@
 'use client';
 
-import { use } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
+import { useRouter, useParams } from 'next/navigation';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
-import { getScoresByTopicId } from '@/lib/mock/quiz';
-import { getTopicById } from '@/lib/mock/subjects';
+import LoadingSpinner from '@/components/LoadingSpinner';
+import { auth } from '@/lib/firebase';
 
-export default function QuizHistoryPage({ params }) {
-  const { topic_id } = use(params);
+export default function QuizHistoryPage() {
   const router = useRouter();
-  const topic = getTopicById(topic_id);
-  const scores = getScoresByTopicId(topic_id);
+  const params = useParams();
+  const topicId = params?.topic_id;
+
+  const [scores, setScores] = useState([]);
+  const [topic, setTopic] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const loadHistoryData = async () => {
+    if (!topicId) return;
+    try {
+      setLoading(true);
+      setError('');
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      // 1. Fetch scores history for this topic
+      const scoresRes = await fetch(`/api/quiz/scores/${topicId}`, {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const scoresData = await scoresRes.json();
+      if (!scoresRes.ok || !scoresData.success) {
+        throw new Error(scoresData.error || 'Failed to fetch score history');
+      }
+      
+      // Store sorted oldest to newest to match chart trend drawing mapping
+      const sortedOldestToNewest = (scoresData.data.scores || []).slice().reverse();
+      setScores(sortedOldestToNewest);
+
+      // 2. Fetch subjects list to extract topic & subject name context
+      const subjectsRes = await fetch('/api/subjects', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const subjectsData = await subjectsRes.json();
+      if (!subjectsRes.ok || !subjectsData.success) {
+        throw new Error(subjectsData.error || 'Failed to fetch subject details');
+      }
+
+      let foundTopic = null;
+      let foundSubject = null;
+      for (const s of (subjectsData.data.subjects || [])) {
+        const t = (s.topics || []).find((x) => String(x.id) === String(topicId));
+        if (t) {
+          foundTopic = t;
+          foundSubject = s;
+          break;
+        }
+      }
+
+      if (foundTopic) {
+        setTopic({
+          id: foundTopic.id,
+          name: foundTopic.name,
+          subject_id: foundSubject.id,
+          subjectName: foundSubject.name,
+        });
+      } else {
+        setTopic({
+          id: topicId,
+          name: 'Topic',
+          subject_id: '',
+          subjectName: 'Subject',
+        });
+      }
+
+    } catch (err) {
+      console.error('[quiz-history] Load error:', err);
+      setError(err.message || 'Something went wrong while loading history');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (user) {
+        loadHistoryData();
+      } else {
+        router.push('/');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [topicId, router]);
 
   const formatDate = (iso) =>
     new Date(iso).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+  if (loading) {
+    return (
+      <>
+        <TopHeader title="Quiz History" backHref={topic?.subject_id ? `/subjects/${topic.subject_id}` : '/subjects'} />
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '50dvh' }}>
+          <LoadingSpinner label="Loading score history..." />
+        </div>
+      </>
+    );
+  }
+
+  if (error) {
+    return (
+      <>
+        <TopHeader title="Error" backHref="/subjects" />
+        <div className="page-padding">
+          <div className="card" style={{ textAlign: 'center', padding: 24, borderColor: 'var(--error)' }}>
+            <p style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary btn-full" onClick={loadHistoryData}>Retry</button>
+          </div>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
       <TopHeader
         title="Quiz History"
-        backHref={`/quiz/${topic_id}`}
+        backHref={`/quiz/${topicId}`}
       />
 
       <div className="page-padding">
@@ -29,7 +140,7 @@ export default function QuizHistoryPage({ params }) {
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 2 }}>Topic</div>
             <div style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-              {topic?.name ?? topic_id}
+              {topic?.name ?? topicId}
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 2 }}>
               {topic?.subjectName}
@@ -38,7 +149,7 @@ export default function QuizHistoryPage({ params }) {
           <button
             className="btn btn-primary"
             style={{ fontSize: '0.75rem', padding: '6px 12px', minHeight: 'unset', height: 36, flexShrink: 0 }}
-            onClick={() => router.push(`/quiz/${topic_id}`)}
+            onClick={() => router.push(`/quiz/${topicId}`)}
           >
             <RotateCcw size={13} /> Retake
           </button>
@@ -50,7 +161,7 @@ export default function QuizHistoryPage({ params }) {
             <div style={{ fontSize: '2.5rem', marginBottom: 12 }}>📊</div>
             <h3 style={{ marginBottom: 8 }}>No Quiz History</h3>
             <p style={{ marginBottom: 20 }}>Take the quiz to see your scores here!</p>
-            <button className="btn btn-primary" onClick={() => router.push(`/quiz/${topic_id}`)}>
+            <button className="btn btn-primary" onClick={() => router.push(`/quiz/${topicId}`)}>
               Start Quiz
             </button>
           </div>
@@ -76,7 +187,7 @@ export default function QuizHistoryPage({ params }) {
                           minHeight: 4,
                         }}
                       />
-                      <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)' }}>#{i + 1}</span>
+                      <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>#{i + 1}</span>
                     </div>
                   );
                 })}
