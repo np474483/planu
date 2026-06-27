@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { CheckCircle2, ChevronRight, ArrowLeft } from 'lucide-react';
+import { auth } from '@/lib/firebase';
 
 const EDUCATION_LEVELS = [
   {
@@ -34,13 +35,59 @@ export default function OnboardingPage() {
   const [selectedLevel, setSelectedLevel] = useState(null);
   const [classYear, setClassYear] = useState('');
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
 
   const handleFinish = async () => {
     if (!classYear.trim()) return;
     setSaving(true);
-    // Mock save delay
-    await new Promise((r) => setTimeout(r, 1000));
-    router.push('/dashboard');
+    setError('');
+
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        throw new Error('No user session found. Please sign in again.');
+      }
+
+      // Map UI selectedLevel keys to database constraints: school, ug, pg
+      const levelMap = {
+        school: 'school',
+        undergraduate: 'ug',
+        postgraduate: 'pg',
+      };
+      const education_level = levelMap[selectedLevel];
+
+      if (!education_level) {
+        throw new Error('Please select a valid education level.');
+      }
+
+      // Retrieve Firebase ID token for Authorization header
+      const idToken = await currentUser.getIdToken();
+
+      // Call profile update API
+      const res = await fetch('/api/auth/profile', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          education_level,
+          class_or_year: classYear,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to save onboarding details');
+      }
+
+      router.push('/dashboard');
+    } catch (err) {
+      console.error('[onboarding] Error:', err);
+      setError(err.message || 'Something went wrong while setting up profile');
+      setSaving(false);
+    }
   };
 
   return (
@@ -213,6 +260,19 @@ export default function OnboardingPage() {
           </div>
 
           <div style={{ marginTop: 28 }}>
+            {error && (
+              <p style={{
+                textAlign: 'center',
+                fontSize: '0.8125rem',
+                color: '#F43F5E',
+                marginBottom: 12,
+                padding: '8px 12px',
+                background: 'color-mix(in srgb, #F43F5E 8%, transparent)',
+                borderRadius: 8,
+              }}>
+                {error}
+              </p>
+            )}
             <button
               onClick={handleFinish}
               disabled={!classYear.trim() || saving}
