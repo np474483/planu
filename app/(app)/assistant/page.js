@@ -1,9 +1,11 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { Send } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import ChatBubble, { TypingIndicator } from '@/components/ChatBubble';
+import { auth } from '@/lib/firebase';
 
 const QUICK_QUESTIONS = [
   'How do I add a subject?',
@@ -12,16 +14,6 @@ const QUICK_QUESTIONS = [
   'How do I mark a topic as done?',
   'How do I change my theme?',
 ];
-
-const ASSISTANT_REPLIES = {
-  'How do I add a subject?': "To add a subject, go to the **Dashboard** or the **Subjects** tab. Tap the ➕ button (FAB) at the bottom right. Enter your subject name and exam date, then tap 'Add Subject'. Done! 🎉",
-  'How does the study plan work?': "The Study Plan is AI-powered! Go to the **Plan** tab and tap 'Generate My Plan'. The AI analyzes all your subjects, topics, exam dates, and your education level to create a day-by-day schedule. You can regenerate it anytime if you add new subjects. 🤖",
-  'How do I take a quiz?': "You can take a quiz in two ways: (1) Go to any subject, then tap any topic's 3-dot menu → 'Take Quiz'. (2) Or tap the 'Take Quiz' button at the bottom of any topics list. The AI generates 5 MCQs for that specific topic instantly! 🎯",
-  'How do I mark a topic as done?': "Inside any subject's topics list, tap the status badge (the colored pill) next to a topic. It cycles through: ⚪ Not Started → 🟡 In Progress → 🟢 Completed. Your progress bar updates instantly! 📈",
-  'How do I change my theme?': "Tap the palette icon 🎨 in the top-right corner of the Dashboard, Profile, or Settings page. You can switch between 5 gradient themes: Ocean Teal, Midnight Purple, Forest Green, Sunset Orange, and Rose Dawn. Each works in both Light and Dark mode! ✨",
-};
-
-const DEFAULT_REPLY = "That's a great question! PlanU is designed to be super intuitive. You can navigate using the bottom bar: Home (Dashboard), Plan (AI Study Plan), Chat (AI Tutor), Progress tracker, and Profile. If you're unsure about anything specific, just ask me! 😊";
 
 const INITIAL_MESSAGES = [
   {
@@ -33,10 +25,20 @@ const INITIAL_MESSAGES = [
 ];
 
 export default function AssistantPage() {
+  const router = useRouter();
   const [messages, setMessages] = useState(INITIAL_MESSAGES);
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
   const endRef = useRef(null);
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((user) => {
+      if (!user) {
+        router.push('/');
+      }
+    });
+    return () => unsubscribe();
+  }, [router]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -46,16 +48,80 @@ export default function AssistantPage() {
     const msgText = text || input.trim();
     if (!msgText || typing) return;
     setInput('');
-    const userMsg = { id: `m_${Date.now()}`, role: 'user', content: msgText, time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) };
+
+    const timestamp = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    const userMsg = {
+      id: `m_${Date.now()}`,
+      role: 'user',
+      content: msgText,
+      time: timestamp,
+    };
+
     setMessages((prev) => [...prev, userMsg]);
     setTyping(true);
-    await new Promise((r) => setTimeout(r, 900 + Math.random() * 500));
-    const reply = ASSISTANT_REPLIES[msgText] ?? DEFAULT_REPLY;
-    setMessages((prev) => [
-      ...prev,
-      { id: `m_${Date.now() + 1}`, role: 'ai', content: reply, time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) },
-    ]);
-    setTyping(false);
+
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) throw new Error('Not authenticated');
+      const idToken = await currentUser.getIdToken();
+
+      const historyForAPI = messages
+        .filter((msg) => msg.role === 'user' || msg.role === 'ai')
+        .map((msg) => ({
+          role: msg.role,
+          text: msg.content,
+        }));
+
+      const res = await fetch('/api/ai/assistant', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: msgText,
+          history: historyForAPI,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        const errMsg = data.error || 'AI response failed, please try again';
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `sys_${Date.now()}`,
+            role: 'system',
+            content: errMsg,
+            time: timestamp,
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `m_${Date.now() + 1}`,
+            role: 'ai',
+            content: data.data.reply,
+            time: timestamp,
+          },
+        ]);
+      }
+    } catch (err) {
+      console.error('[assistant] Send error:', err);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys_${Date.now()}`,
+          role: 'system',
+          content: 'AI response failed, please try again',
+          time: timestamp,
+        },
+      ]);
+    } finally {
+      setTyping(false);
+    }
   };
 
   return (
@@ -64,9 +130,30 @@ export default function AssistantPage() {
 
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {messages.map((msg) => (
-          <ChatBubble key={msg.id} role={msg.role} content={msg.content} time={msg.time} />
-        ))}
+        {messages.map((msg) => {
+          if (msg.role === 'system') {
+            return (
+              <div
+                key={msg.id}
+                style={{
+                  alignSelf: 'center',
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-muted)',
+                  fontSize: '0.75rem',
+                  padding: '6px 12px',
+                  borderRadius: 'var(--radius-btn)',
+                  margin: '8px 0',
+                  textAlign: 'center',
+                  maxWidth: '85%'
+                }}
+              >
+                ⚠️ {msg.content}
+              </div>
+            );
+          }
+          return <ChatBubble key={msg.id} role={msg.role} content={msg.content} time={msg.time} />;
+        })}
         {typing && <TypingIndicator />}
         <div ref={endRef} />
 

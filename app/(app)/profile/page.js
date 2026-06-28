@@ -1,41 +1,252 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { Camera, Edit2, LogOut, Bell, Settings, ChevronRight } from 'lucide-react';
 import TopHeader from '@/components/TopHeader';
 import ThemeSwitcher from '@/components/ThemeSwitcher';
 import ProgressBar from '@/components/ProgressBar';
-import { mockUser, getUserInitials } from '@/lib/mock/user';
-import { getOverallProgress, getDashboardStats } from '@/lib/mock/subjects';
+import LoadingSpinner from '@/components/LoadingSpinner';
+import { auth } from '@/lib/firebase';
 
 const EDUCATION_LABELS = {
   school: 'School',
-  undergraduate: 'Undergraduate',
-  postgraduate: 'Postgraduate',
+  ug: 'Undergraduate',
+  pg: 'Postgraduate',
 };
+
+function getUserInitials(name) {
+  if (!name) return 'U';
+  return name
+    .split(' ')
+    .slice(0, 2)
+    .map((n) => n[0].toUpperCase())
+    .join('');
+}
 
 export default function ProfilePage() {
   const router = useRouter();
-  const [user, setUser] = useState(mockUser);
+  const fileInputRef = useRef(null);
+
+  const [user, setUser] = useState(null);
   const [editing, setEditing] = useState(false);
-  const [editLevel, setEditLevel] = useState(user.education_level);
-  const [editYear, setEditYear] = useState(user.class_or_year);
+  const [editLevel, setEditLevel] = useState('');
+  const [editYear, setEditYear] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
-  const overall = getOverallProgress();
-  const stats = getDashboardStats();
-  const initials = getUserInitials(user.name);
+  const [stats, setStats] = useState({
+    totalSubjects: 0,
+    totalTopics: 0,
+    topicsDone: 0,
+    overallProgress: 0,
+  });
 
-  const saveEdit = () => {
-    setUser((prev) => ({ ...prev, education_level: editLevel, class_or_year: editYear }));
-    setEditing(false);
+  const loadProfileAndStats = async () => {
+    try {
+      setLoading(true);
+      setError('');
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      // 1. Fetch user profile
+      const profileRes = await fetch('/api/auth/profile', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const profileData = await profileRes.json();
+      if (!profileRes.ok || !profileData.success) {
+        throw new Error(profileData.error || 'Failed to load profile');
+      }
+
+      const dbUser = profileData.data.user;
+      setUser(dbUser);
+      setEditLevel(dbUser.education_level || 'school');
+      setEditYear(dbUser.class_or_year || '');
+
+      // 2. Fetch subjects list to calculate real stats
+      const subjectsRes = await fetch('/api/subjects', {
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+      });
+      const subjectsData = await subjectsRes.json();
+      if (!subjectsRes.ok || !subjectsData.success) {
+        throw new Error(subjectsData.error || 'Failed to load subject statistics');
+      }
+
+      const subjects = subjectsData.data.subjects || [];
+      const totalSubjects = subjects.length;
+      let totalTopics = 0;
+      let topicsDone = 0;
+
+      subjects.forEach((s) => {
+        (s.topics || []).forEach((t) => {
+          totalTopics++;
+          if (t.status === 'completed') {
+            topicsDone++;
+          }
+        });
+      });
+
+      const overallProgress = totalTopics > 0 ? Math.round((topicsDone / totalTopics) * 100) : 0;
+
+      setStats({
+        totalSubjects,
+        totalTopics,
+        topicsDone,
+        overallProgress,
+      });
+
+    } catch (err) {
+      console.error('[profile] Initial load error:', err);
+      setError(err.message || 'Something went wrong while loading profile');
+    } finally {
+      setLoading(false);
+    }
   };
+
+  useEffect(() => {
+    const unsubscribe = auth.onAuthStateChanged((u) => {
+      if (u) {
+        loadProfileAndStats();
+      } else {
+        router.push('/');
+      }
+    });
+
+    return () => unsubscribe();
+  }, [router]);
+
+  const saveEdit = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      const res = await fetch('/api/auth/profile', {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          education_level: editLevel,
+          class_or_year: editYear,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to save profile changes');
+      }
+
+      setUser(data.data.user);
+      setEditing(false);
+    } catch (err) {
+      console.error('[profile-edit] Save error:', err);
+      alert('Save failed: ' + err.message);
+    }
+  };
+
+  const handlePhotoUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !user) return;
+
+    try {
+      setUploadingPhoto(true);
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      const idToken = await currentUser.getIdToken();
+
+      // Create FormData payload
+      const formData = new FormData();
+      formData.append('file', file);
+
+      // POST image to server avatar upload endpoint
+      const res = await fetch('/api/auth/upload-avatar', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`,
+        },
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to upload photo');
+      }
+
+      // Update local state immediately with returned URL
+      const publicUrl = data.data.profile_photo_url;
+      setUser((prev) => ({
+        ...prev,
+        profile_photo_url: publicUrl,
+      }));
+    } catch (err) {
+      console.error('[profile-photo] Upload error:', err);
+      alert('Photo upload failed: ' + err.message);
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await auth.signOut();
+      router.push('/');
+    } catch (err) {
+      console.error('[profile] Logout error:', err);
+    }
+  };
+
+  if (loading) {
+    return (
+      <>
+        <TopHeader title="Profile" rightSlot={<ThemeSwitcher />} />
+        <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '50dvh' }}>
+          <LoadingSpinner label="Loading profile detail..." />
+        </div>
+      </>
+    );
+  }
+
+  if (error) {
+    return (
+      <>
+        <TopHeader title="Error" rightSlot={<ThemeSwitcher />} />
+        <div className="page-padding">
+          <div className="card" style={{ textAlign: 'center', padding: 24, borderColor: 'var(--error)' }}>
+            <p style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 12 }}>{error}</p>
+            <button className="btn btn-secondary btn-full" onClick={loadProfileAndStats}>Retry</button>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  const initials = getUserInitials(user?.name);
+  const memberSince = user?.created_at
+    ? new Date(user.created_at).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+    : 'June 2026';
 
   return (
     <>
       <TopHeader
         title="Profile"
         rightSlot={<ThemeSwitcher />}
+      />
+
+      {/* Hidden file input for camera/gallery */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handlePhotoUpload}
+        accept="image/*"
+        style={{ display: 'none' }}
       />
 
       <div style={{ paddingBottom: 24 }}>
@@ -53,15 +264,22 @@ export default function ProfilePage() {
                 border: '3px solid rgba(255,255,255,0.5)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 fontSize: '1.75rem', fontWeight: 800, color: '#fff',
+                overflow: 'hidden',
               }}
             >
-              {user.profile_photo_url ? (
+              {uploadingPhoto ? (
+                <div style={{ transform: 'scale(0.8)' }}>
+                  <LoadingSpinner size={24} />
+                </div>
+              ) : user.profile_photo_url ? (
                 <img src={user.profile_photo_url} alt="Profile" style={{ width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover' }} />
               ) : (
                 initials
               )}
             </div>
             <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingPhoto}
               style={{
                 position: 'absolute', bottom: -2, right: -2,
                 width: 28, height: 28, borderRadius: '50%',
@@ -88,9 +306,9 @@ export default function ProfilePage() {
           <div className="card animate-fade-in" style={{ marginBottom: 16, marginTop: -16, position: 'relative', zIndex: 10 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
               <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>Overall Progress</span>
-              <span style={{ fontSize: '0.875rem', fontWeight: 700, color: 'var(--accent)' }}>{overall}%</span>
+              <span style={{ fontSize: '0.875rem', fontWeight: 700, color: 'var(--accent)' }}>{stats.overallProgress}%</span>
             </div>
-            <ProgressBar percent={overall} height={8} />
+            <ProgressBar percent={stats.overallProgress} height={8} />
             <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
               <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                 {stats.topicsDone}/{stats.totalTopics} topics
@@ -133,8 +351,8 @@ export default function ProfilePage() {
                     style={{ cursor: 'pointer' }}
                   >
                     <option value="school">School (Class 6-12)</option>
-                    <option value="undergraduate">Undergraduate</option>
-                    <option value="postgraduate">Postgraduate</option>
+                    <option value="ug">Undergraduate</option>
+                    <option value="pg">Postgraduate</option>
                   </select>
                 </div>
                 <div>
@@ -154,7 +372,7 @@ export default function ProfilePage() {
                 {[
                   { label: 'Education Level', value: EDUCATION_LABELS[user.education_level] },
                   { label: 'Class / Year', value: user.class_or_year },
-                  { label: 'Member Since', value: 'June 2026' },
+                  { label: 'Member Since', value: memberSince },
                 ].map(({ label, value }) => (
                   <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
                     <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{label}</span>
@@ -195,7 +413,7 @@ export default function ProfilePage() {
           <button
             className="btn btn-danger btn-full animate-fade-in"
             style={{ animationDelay: '0.15s' }}
-            onClick={() => router.push('/')}
+            onClick={handleLogout}
           >
             <LogOut size={16} /> Log Out
           </button>

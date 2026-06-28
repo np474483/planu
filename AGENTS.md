@@ -9,4 +9,6 @@ This version has breaking changes — APIs, conventions, and file structure may 
   Gemini should automatically suggest reminders based 
   on the plan schedule. User can accept or modify them.
   Manual reminder creation stays as an option alongside.
-
+- Profile photo cropping: After selecting a photo, 
+  show a crop/adjust window before uploading. 
+  Use react-image-crop or cropperjs library.
