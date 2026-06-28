@@ -8,8 +8,6 @@ import { verifyFirebaseToken } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/db';
 
 export async function POST(request) {
-  console.log('SUPABASE URL:', process.env.NEXT_PUBLIC_SUPABASE_URL)
-  console.log('SERVICE KEY EXISTS:', !!process.env.SUPABASE_SERVICE_ROLE_KEY)
   try {
     // 1. Verify Firebase ID token from Authorization header
     let decodedToken;
