@@ -18,6 +18,7 @@ export const metadata = {
     statusBarStyle: 'default',
     title: 'PlanU',
   },
+  manifest: '/manifest.json',
 };
 
 // Next.js 16: themeColor and viewport must be in a separate export
@@ -37,6 +38,7 @@ export default function RootLayout({ children }) {
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
         <meta name="apple-mobile-web-app-title" content="PlanU" />
+        <link rel="manifest" href="/manifest.json" />
       </head>
       <body>
         <ThemeProvider>
